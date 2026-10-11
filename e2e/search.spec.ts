@@ -1,0 +1,252 @@
+import { expect, test } from "@playwright/test";
+import { expectSearchParam, getProducts, productIdsIn, resultTotal, visit } from "./support/app";
+
+/**
+ * `/search` regression.
+ *
+ * Every filter lives in the URL, so the interesting failures are all in the
+ * round trip: a control that forgets to write its param, a param the query
+ * layer ignores, or a filter change that does not reset the page number. Each
+ * spec below therefore asserts the URL *and* the resulting ids, with the ids
+ * compared against `/api/products` so a UI/query mismatch fails here.
+ */
+
+/** `/search` pages 12 at a time. */
+const PER_PAGE = 12;
+
+test.describe("/search", () => {
+  test("lists the whole catalogue on first load", async ({ page, request }) => {
+    const { meta } = await getProducts(request, "?limit=1");
+    await visit(page, "/search");
+
+    await expect(page.getByRole("heading", { name: "All Products" })).toBeVisible();
+    expect(await resultTotal(page)).toBe(meta.total);
+    expect(await productIdsIn(page, "main")).toHaveLength(Math.min(PER_PAGE, meta.total));
+  });
+
+  test("submitting the header search box navigates with the term", async ({ page }) => {
+    await visit(page, "/");
+
+    await page.getByLabel("Search products").fill("beef");
+    await page.getByRole("button", { name: "Search" }).click();
+
+    await expect(page).toHaveURL(/\/search\?/);
+    await expectSearchParam(page, "q", "beef");
+    await expect(page.getByRole("heading", { name: "Search: beef" })).toBeVisible();
+    expect(await productIdsIn(page, "main")).not.toHaveLength(0);
+  });
+
+  test("the category dropdown filters as soon as it changes", async ({ page, request }) => {
+    await visit(page, "/");
+    await page.getByLabel("Category").selectOption("Raw Meats");
+
+    await expect(page).toHaveURL(/\/search\?/);
+    await expectSearchParam(page, "category", "Raw Meats");
+
+    const expected = await getProducts(request, "?category=Raw%20Meats&limit=50");
+
+    // Wait for the destination page, not just the URL. `router.push` updates the
+    // address bar before the new document's grid streams in, and `main` still
+    // holds the homepage's shelves at that point — reading ids then returns the
+    // Top Saver and Best Seller products, which is what this assertion catches.
+    await expect(page.getByRole("navigation", { name: "Breadcrumb" })).toContainText("Search");
+    await expect.poll(() => productIdsIn(page, "main")).toEqual(
+      expected.items.map((item) => item.id),
+    );
+  });
+
+  test("a term search matches what the API returns", async ({ page, request }) => {
+    const expected = await getProducts(request, "?q=beef");
+    await visit(page, "/search?q=beef");
+
+    expect(await resultTotal(page)).toBe(expected.meta.total);
+    expect(await productIdsIn(page, "main")).toEqual(expected.items.map((item) => item.id));
+    await expect(page.getByText(/results for “beef”/)).toBeVisible();
+  });
+
+  test("shows the empty state instead of a blank grid", async ({ page }) => {
+    await visit(page, "/search?q=nothingmatchesthis");
+
+    await expect(page.getByRole("heading", { name: "No products found" })).toBeVisible();
+    await expect(page.locator('a[href^="/product/"]')).toHaveCount(0);
+    // No pagination to show when there is nothing to page through.
+    await expect(page.getByRole("navigation", { name: "Pagination" })).toHaveCount(0);
+  });
+
+  test("category facets narrow the grid and survive the round trip", async ({ page, request }) => {
+    await visit(page, "/search");
+
+    await page.locator("aside").getByRole("link", { name: /Raw Meats/ }).click();
+
+    await expect(page).toHaveURL(/\/search\?/);
+    await expectSearchParam(page, "category", "Raw Meats");
+
+    const expected = await getProducts(request, "?category=Raw%20Meats");
+    expect(await productIdsIn(page, "main")).toEqual(expected.items.map((item) => item.id));
+  });
+
+  test("a brand facet composes with the active category", async ({ page, request }) => {
+    await visit(page, "/search?category=Raw%20Meats");
+    await page.locator("aside").getByRole("link", { name: /Meat Brand/ }).click();
+
+    await expect(page).toHaveURL(/\/search\?/);
+    await expectSearchParam(page, "category", "Raw Meats");
+    await expectSearchParam(page, "brand", "Meat Brand");
+
+    const expected = await getProducts(request, "?category=Raw%20Meats&brand=Meat%20Brand");
+    expect(await productIdsIn(page, "main")).toEqual(expected.items.map((item) => item.id));
+  });
+
+  test("Clear all filters drops every param", async ({ page }) => {
+    await visit(page, "/search?q=beef&category=Raw%20Meats&onSale=true");
+
+    await page.getByRole("link", { name: "Clear all filters" }).click();
+
+    await expect(page).toHaveURL("/search");
+    await expect(page.getByRole("link", { name: "Clear all filters" })).toHaveCount(0);
+  });
+
+  test("sorting writes the param and reorders the grid", async ({ page, request }) => {
+    const expected = await getProducts(request, "?sort=price_asc");
+    await visit(page, "/search");
+
+    await page.getByLabel("Sort by").selectOption("price_asc");
+
+    await expect(page).toHaveURL(/sort=price_asc/);
+    expect(await productIdsIn(page, "main")).toEqual(expected.items.map((item) => item.id));
+  });
+
+  test("an unknown sort value falls back to the default ordering", async ({ page, request }) => {
+    // Regression: `?sort=sideways` used to reach ORDER BY unguarded. The <select>
+    // is controlled, so a rejected value must still render a real option.
+    const expected = await getProducts(request);
+    await visit(page, "/search?sort=sideways");
+
+    await expect(page.getByLabel("Sort by")).toHaveValue("best_selling");
+    expect(await productIdsIn(page, "main")).toEqual(expected.items.map((item) => item.id));
+  });
+
+  test("the On sale toggle is a pressed-state button that filters", async ({ page, request }) => {
+    const expected = await getProducts(request, "?onSale=true");
+    await visit(page, "/search");
+
+    const toggle = page.getByRole("button", { name: "On sale only" });
+    await expect(toggle).toHaveAttribute("aria-pressed", "false");
+
+    await toggle.click();
+
+    await expect(page).toHaveURL(/onSale=true/);
+    await expect(page.getByRole("button", { name: "On sale only" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(await productIdsIn(page, "main")).toEqual(expected.items.map((item) => item.id));
+  });
+
+  test("paginates and marks the current page", async ({ page, request }) => {
+    const second = await getProducts(request, "?page=2");
+    await visit(page, "/search");
+
+    const pagination = page.getByRole("navigation", { name: "Pagination" });
+    await expect(pagination).toBeVisible();
+    await expect(pagination.getByRole("link", { name: "1", exact: true })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+
+    await pagination.getByRole("link", { name: "2", exact: true }).click();
+
+    await expect(page).toHaveURL(/page=2/);
+    await expect(pagination.getByRole("link", { name: "2", exact: true })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(await productIdsIn(page, "main")).toEqual(second.items.map((item) => item.id));
+  });
+
+  test("changing a filter resets the page number", async ({ page }) => {
+    await visit(page, "/search?page=3");
+
+    await page.getByRole("button", { name: "On sale only" }).click();
+
+    // Regression: page 3 of a filtered set is almost always empty, so the
+    // controls clear `page` whenever anything else changes.
+    await expect(page).toHaveURL(/onSale=true/);
+    await expectSearchParam(page, "page", null);
+  });
+
+  test("clicking a facet link also resets the page number", async ({ page }) => {
+    await visit(page, "/search?page=3");
+
+    await page.locator("aside").getByRole("link", { name: /Raw Meats/ }).click();
+
+    // The facet links go through `href()` in search-results, a different helper
+    // from the one the toggle and sort controls use. Both have to clear `page`,
+    // and a regression in either one is invisible to the other path.
+    await expectSearchParam(page, "category", "Raw Meats");
+    await expectSearchParam(page, "page", null);
+    await expect(page.locator('a[href^="/product/"]').first()).toBeVisible();
+  });
+
+  test("paging preserves the other filters", async ({ page }) => {
+    // `?onSale=true` alone leaves only 10 products, which is one page — the
+    // pagination link would not exist. `sort` travels alongside `page` on the
+    // unfiltered catalogue, which is where the OFFSET actually moves.
+    await visit(page, "/search?sort=price_asc&page=1");
+
+    const pagination = page.getByRole("navigation", { name: "Pagination" });
+    await pagination.getByRole("link", { name: "2", exact: true }).click();
+
+    await expectSearchParam(page, "page", "2");
+    await expectSearchParam(page, "sort", "price_asc");
+  });
+
+  test("a page number past the end renders without erroring", async ({ page }) => {
+    await visit(page, "/search?page=999");
+
+    await expect(page.locator("main")).toBeVisible();
+    await expect(
+      page
+        .getByRole("heading", { name: "No products found" })
+        .or(page.locator('a[href^="/product/"]').first()),
+    ).toBeVisible();
+  });
+
+  test("filters are combined in the URL as well as in the query", async ({ page, request }) => {
+    await visit(page, "/search?category=Raw%20Meats&onSale=true&sort=price_asc");
+
+    await expect(page.getByRole("button", { name: "On sale only" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    await expect(page.getByLabel("Sort by")).toHaveValue("price_asc");
+
+    const expected = await getProducts(request, "?category=Raw%20Meats&onSale=true&sort=price_asc");
+    expect(await productIdsIn(page, "main")).toEqual(expected.items.map((item) => item.id));
+  });
+
+  test("a product card navigates to its detail page", async ({ page }) => {
+    await visit(page, "/search?q=beef");
+
+    const card = page.locator('a[href^="/product/"]').first();
+    const id = (await card.getAttribute("href"))!.replace("/product/", "");
+    await card.click();
+
+    await expect(page).toHaveURL(new RegExp(`/product/${id}$`));
+    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+  });
+
+  test("@responsive stacks the facets above the grid", async ({ page }) => {
+    await visit(page, "/search?q=beef");
+
+    // `lg:grid-cols-[220px_1fr]` collapses to one column, so the aside sits
+    // above the results instead of beside them.
+    const aside = page.locator("aside");
+    await expect(aside).toBeVisible();
+    const [asideBox, cardBox] = await Promise.all([
+      aside.boundingBox(),
+      page.locator('a[href^="/product/"]').first().boundingBox(),
+    ]);
+    expect(asideBox!.y).toBeLessThan(cardBox!.y);
+  });
+});
