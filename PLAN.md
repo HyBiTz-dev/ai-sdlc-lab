@@ -268,9 +268,10 @@
   - ตอนนี้มี `q` ปุ๊บ `orderByClause` ถูกทิ้งทิ้ง → ผู้ใช้เลือก "Price: low to high" แล้ว select ยังโชว์ว่าเลือกอยู่ แต่ grid ไม่ขยับ
   - FTS5 กรองได้ตามปกติ จัดอันดับไม่ตาม relevance เท่านั้น
   - เพิ่ม test pin พฤติกรรมใหม่ (`queries.test.ts:175` เดิม pin ตัวเก่า)
-- [ ] **7.4.3** `src/components/search-bar.tsx:5-6` — ให้ `SearchBar` อ่าน `useSearchParams()` ให้ตรงกับ URL
+- [x] **7.4.3** `src/components/search-bar.tsx:5-6` — ให้ `SearchBar` อ่าน `useSearchParams()` ให้ตรงกับ URL
   - ตอนนี้ `/search?q=milk` แสดงผลลัพธ์ แต่ช่องค้นาว่างเปล่า และ dropdown ขึ้น "All Categories"
   - `search-controls.tsx:25` ทำถูกแล้ว — ใช้เป็นต้นแบบ
+  - เสร็จพร้อม dropdown typeahead: `useState(() => searchParams.get(...))` + `edited` ref กัน URL ที่มี `q` อยู่แล้วเปิด dropdown เอง
 - [ ] **7.4.4** `src/components/search-bar.tsx:35-38` — clone `URLSearchParams` เดิมแทนการสร้างใหม่
   - เปลี่ยน category ตอนนี้ทิ้ง `brand` / `sort` / `onSale` / `page` หมดโดยไม่เตือน
   - `SearchControls.withParam` (`search-controls.tsx:11`) ทำถูกแล้วในไฟล์เดียวกัน

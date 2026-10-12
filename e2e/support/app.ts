@@ -117,6 +117,24 @@ export const getShelf = (request: APIRequestContext, shelf: "top-savers" | "best
   fetchJson<ShelfDto>(request, `/api/shelves/${shelf}`);
 
 /**
+ * The header search input.
+ *
+ * `:visible` is not optional. A client-side navigation leaves the outgoing
+ * page's `<header>` mounted — permanently, it turns out — and because `body` is a
+ * column flex container the leftover is flex-shrunk to a 0×0 box. `getByLabel`
+ * matches it anyway and either trips a strict-mode violation or hands Playwright
+ * an element it waits forever to type into.
+ */
+export function searchBox(page: Page) {
+  return page.getByLabel("Search products").filter({ visible: true });
+}
+
+/** The header category picker, same `:visible` reasoning as {@link searchBox}. */
+export function categoryPicker(page: Page) {
+  return page.getByLabel("Category").filter({ visible: true });
+}
+
+/**
  * The count in the "N products" line above the `/search` grid. Reads the first
  * number on the line so a summary suffix ("in Raw Meats") does not break it.
  */

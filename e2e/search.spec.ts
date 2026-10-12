@@ -1,5 +1,14 @@
-import { expect, test } from "@playwright/test";
-import { expectSearchParam, getProducts, productIdsIn, resultTotal, visit } from "./support/app";
+import { expect, test, type Page } from "@playwright/test";
+import {
+  categoryPicker,
+  expectSearchParam,
+  getProducts,
+  hydrated,
+  productIdsIn,
+  resultTotal,
+  searchBox,
+  visit,
+} from "./support/app";
 
 /**
  * `/search` regression.
@@ -248,5 +257,196 @@ test.describe("/search", () => {
       page.locator('a[href^="/product/"]').first().boundingBox(),
     ]);
     expect(asideBox!.y).toBeLessThan(cardBox!.y);
+  });
+});
+
+/**
+ * Typeahead in the header search box.
+ *
+ * The dropdown runs the same FTS5 query as `/api/products` through a server
+ * action, capped at three rows. Every expectation here is read from the API and
+ * compared against the listbox, so a divergence between the two surfaces — the
+ * thing that would actually be wrong — fails rather than passing on both sides
+ * drifting together.
+ */
+test.describe("header search suggestions", () => {
+  // `milk` matches five products, so every run of these specs exercises the
+  // three-row cap and the "N results" footer rather than a list that happens to
+  // fit.
+  const TERM = "milk";
+  const CAP = 3;
+
+  const listbox = (page: Page) => page.getByRole("listbox", { name: "Search suggestions" });
+  const options = (page: Page) => listbox(page).getByRole("option");
+  const optionIds = (page: Page) =>
+    options(page).evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-product-id")));
+
+  /** Types into the header box and waits for the dropdown to settle. */
+  async function type(page: Page, term: string) {
+    await searchBox(page).fill(term);
+    await expect(listbox(page)).toBeVisible();
+  }
+
+  test("lists the top matches for the typed term, capped at three", async ({ page, request }) => {
+    const expected = await getProducts(request, `?q=${TERM}&limit=${CAP}`);
+    expect(expected.meta.total).toBeGreaterThan(CAP);
+
+    await visit(page, "/");
+    await type(page, TERM);
+
+    await expect(options(page)).toHaveCount(CAP);
+    // Ids rather than text: the row also carries the brand and the price, and
+    // those are the API's business, not this test's.
+    await expect.poll(() => optionIds(page)).toEqual(expected.items.map((item) => item.id));
+  });
+
+  test("a row shows the product's brand, name and price", async ({ page, request }) => {
+    const expected = await getProducts(request, `?q=${TERM}&limit=${CAP}`);
+
+    await visit(page, "/");
+    await type(page, TERM);
+
+    const first = expected.items[0];
+    const row = options(page).first();
+    await expect(row).toContainText(first.brand);
+    await expect(row).toContainText(first.name);
+    await expect(row).toContainText(first.price);
+  });
+
+  test("the footer counts every match, not just the rows shown", async ({ page, request }) => {
+    const { meta } = await getProducts(request, `?q=${TERM}&limit=${CAP}`);
+    const shown = Math.min(CAP, meta.total);
+
+    await visit(page, "/");
+    await type(page, TERM);
+
+    await expect(
+      page.getByRole("button", { name: `See all ${meta.total} results for \u201c${TERM}\u201d` }),
+    ).toBeVisible();
+    await expect(page.getByText(`+${meta.total - shown} more`)).toBeVisible();
+  });
+
+  test("clicking a suggestion searches for that product's name", async ({ page, request }) => {
+    const expected = await getProducts(request, `?q=${TERM}&limit=${CAP}`);
+    await visit(page, "/");
+    await type(page, TERM);
+
+    const name = expected.items[0].name;
+    await options(page).first().click();
+
+    // Filling the box rather than jumping to the detail page: the shopper picks
+    // a product to compare, not one to buy.
+    await expect(page).toHaveURL(/\/search\?/);
+    await expectSearchParam(page, "q", name);
+    await expect(searchBox(page)).toHaveValue(name);
+    await expect(listbox(page)).toHaveCount(0);
+  });
+
+  test("the footer runs the search for the typed term", async ({ page, request }) => {
+    const expected = await getProducts(request, `?q=${TERM}`);
+    await visit(page, "/");
+    await type(page, TERM);
+
+    await page.getByRole("button", { name: /See all \d+ results/ }).click();
+
+    await expectSearchParam(page, "q", TERM);
+    // `expect.poll`, not a single read: the click navigates away from the
+    // homepage, and until the outgoing page unmounts `main:visible` matches both
+    // and returns the homepage's shelves alongside the new results.
+    await expect.poll(() => productIdsIn(page, "main")).toEqual(
+      expected.items.map((item) => item.id),
+    );
+  });
+
+  test("arrow keys move the highlight and Enter picks the row", async ({ page, request }) => {
+    const expected = await getProducts(request, `?q=${TERM}&limit=${CAP}`);
+    await visit(page, "/");
+    await type(page, TERM);
+
+    await expect(searchBox(page)).toHaveAttribute("aria-expanded", "true");
+
+    await searchBox(page).press("ArrowDown");
+    await expect(options(page).first()).toHaveAttribute("aria-selected", "true");
+
+    await searchBox(page).press("ArrowDown");
+    await expect(options(page).nth(1)).toHaveAttribute("aria-selected", "true");
+
+    await searchBox(page).press("Enter");
+    await expectSearchParam(page, "q", expected.items[1].name);
+  });
+
+  test("the highlight wraps around and is reachable by id", async ({ page, request }) => {
+    const expected = await getProducts(request, `?q=${TERM}&limit=${CAP}`);
+    await visit(page, "/");
+    await type(page, TERM);
+
+    await searchBox(page).press("ArrowUp");
+    // `aria-activedescendant` is how a combobox points at its active row without
+    // moving focus, so it has to name the id the option actually carries.
+    const active = await searchBox(page).getAttribute("aria-activedescendant");
+    await expect(options(page).nth(CAP - 1)).toHaveAttribute("id", active!);
+    await expect(options(page).nth(CAP - 1)).toHaveAttribute("aria-selected", "true");
+    expect(active).not.toBeNull();
+
+    await searchBox(page).press("Enter");
+    await expectSearchParam(page, "q", expected.items[CAP - 1].name);
+  });
+
+  test("Escape closes the list and keeps the term", async ({ page }) => {
+    await visit(page, "/");
+    await type(page, TERM);
+
+    await searchBox(page).press("Escape");
+
+    // Regression risk: `<input type="search">` clears itself on Escape as a
+    // browser default, so the handler has to preventDefault to keep the term.
+    await expect(listbox(page)).toHaveCount(0);
+    await expect(searchBox(page)).toHaveValue(TERM);
+  });
+
+  test("a term too short to be selective shows nothing", async ({ page }) => {
+    await visit(page, "/");
+    await searchBox(page).fill("m");
+
+    // Nothing to wait for: the point is that no query runs at all.
+    await page.waitForTimeout(500);
+    await expect(listbox(page)).toHaveCount(0);
+  });
+
+  test("a term with no matches says so instead of an empty box", async ({ page }) => {
+    await visit(page, "/");
+    await searchBox(page).fill("nothingmatchesthis");
+
+    await expect(page.getByText("No matching products")).toBeVisible();
+    await expect(options(page)).toHaveCount(0);
+  });
+
+  test("the chosen category narrows the suggestions", async ({ page, request }) => {
+    const expected = await getProducts(request, `?q=${TERM}&category=Raw%20Meats&limit=${CAP}`);
+    await visit(page, "/");
+    await categoryPicker(page).selectOption("Raw Meats");
+    await expectSearchParam(page, "category", "Raw Meats");
+    // The picker navigates, so the destination header is a new component with a
+    // debounce effect that has not started until it hydrates — a `fill` before
+    // then is silently swallowed.
+    await hydrated(searchBox(page));
+
+    await type(page, TERM);
+
+    await expect.poll(() => optionIds(page)).toEqual(expected.items.map((item) => item.id));
+  });
+
+  test("the box still searches for the typed term with no highlight", async ({ page, request }) => {
+    const expected = await getProducts(request, `?q=${TERM}`);
+    await visit(page, "/");
+    await type(page, TERM);
+
+    await page.getByRole("button", { name: "Search" }).click();
+
+    // Enter or the magnifier with nothing highlighted searches the box verbatim.
+    await expectSearchParam(page, "q", TERM);
+    await expect.poll(() => productIdsIn(page, "main")).toEqual(
+      expected.items.map((item) => item.id),
+    );
   });
 });
