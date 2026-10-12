@@ -14,7 +14,10 @@
     "test:e2e:ui": "playwright test --ui",
     "test:e2e:report": "playwright show-report",
     "e2e:server": "node e2e/reset-db.mjs && next build && next start -p ${E2E_PORT:-3210}",
-    "db:reset": "rm -f data/farmart.db data/farmart.db-shm data/farmart.db-wal"
+    "db:reset": "rm -f data/farmart.db data/farmart.db-shm data/farmart.db-wal",
+    "skill:sync": "node --experimental-strip-types --no-warnings .agents/skills/farmart-dev/scripts/sync.mjs",
+    "skill:watch": "node --experimental-strip-types --no-warnings .agents/skills/farmart-dev/scripts/watch.mjs",
+    "skill:verify": "node --experimental-strip-types --no-warnings .agents/skills/farmart-dev/scripts/verify.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
